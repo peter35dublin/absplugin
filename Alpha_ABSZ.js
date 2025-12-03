@@ -26508,7 +26508,7 @@ FWindow_SkillSelect = class FWindow_SkillSelect extends KDCore.FloatingWindow {
   _.aaMoveTypeKeepDistance = function() {
     var distance, e, target;
     try {
-      // * Если меньше 0, то ничего
+      // * If min patrol distance not set - just face the target
       if (this._aaMinPatrolDist <= 0) {
         this.aaTurnTowardTarget();
         return;
@@ -26519,20 +26519,153 @@ FWindow_SkillSelect = class FWindow_SkillSelect extends KDCore.FloatingWindow {
       }
       distance = this.distTo(target);
       if (distance >= this._aaMaxPatrolDist) {
-        //"DIST > MAX".p()
         this.aaMoveTypeToTarget(target);
         return;
       }
       if (distance <= this._aaMinPatrolDist) {
-        //"DIST <= MIN".p()
         this.moveAwayFromCharacter(target);
         this.aaTurnTowardTarget();
         return;
       }
       if (this._aaCanMakeRandomPatrolMove) {
-        //"RAND MOVE".p()
-        this.moveRandom();
-        this.aaTurnTowardTarget();
+        // --- Smooth/diablo-like random movement implementation ---
+        // We will:
+        // 1) choose and hold a movement direction for some frames,
+        // 2) sometimes pause for short durations,
+        // 3) avoid picking a new direction every AI tick (prevents zig-zag),
+        // 4) try to move to the chosen direction when not moving.
+        //
+        // Implementation details:
+        // - this._aaSmoothRandomTimer : frames left to keep current movement
+        // - this._aaSmoothRandomDir : {dx,dy} current move vector (tile offsets -1..1)
+        // - this._aaSmoothPauseTimer : frames left to pause (not move)
+        //
+        // The AI update calls this function only when !this.isMoving(), so we issue
+        // one move (moveStraight/moveDiagonally) per call, and rely on timers to keep
+        // the behaviour stable across multiple steps.
+        if (this._aaSmoothRandomTimer == null) {
+          this._aaSmoothRandomTimer = 0;
+          this._aaSmoothRandomDir = null;
+          this._aaSmoothPauseTimer = 0;
+          // small jitter avoidance: remember last chosen dir
+          this._aaSmoothLastDir = null;
+        }
+        // If currently in pause - decrement and just face the target
+        if (this._aaSmoothPauseTimer > 0) {
+          this._aaSmoothPauseTimer--;
+          // Gentle facing - do not force instantaneous snapping
+          if (typeof this.aaGentleTurnTowardTarget === 'function') {
+            this.aaGentleTurnTowardTarget();
+          } else {
+            this.aaTurnTowardTarget();
+          }
+          return;
+        }
+        // If no active movement timer, choose new action: pause or move
+        if (this._aaSmoothRandomTimer <= 0) {
+          // 25% chance to pause shortly, else move
+          if (Math.random() < 0.25) {
+            // pause for a short random time (frames)
+            this._aaSmoothPauseTimer = KDCore.SDK ? KDCore.SDK.rand(8, 24) : (Math.floor(Math.random() * 17) + 8);
+            this._aaSmoothRandomTimer = 0;
+            this._aaSmoothRandomDir = null;
+            this.aaTurnTowardTarget();
+            return;
+          } else {
+            // pick a new direction vector biased to circle around target
+            // choose dx,dy from -1..1 but avoid {0,0}
+            var dx = KDCore.SDK ? KDCore.SDK.rand(-1,1) : (Math.floor(Math.random()*3)-1);
+            var dy = KDCore.SDK ? KDCore.SDK.rand(-1,1) : (Math.floor(Math.random()*3)-1);
+            if (dx === 0 && dy === 0) {
+              // prefer lateral move if zero
+              dx = (Math.random() < 0.5) ? 1 : -1;
+            }
+            // Avoid repeating exact same direction too many times: sometimes flip
+            if (this._aaSmoothLastDir && Math.random() < 0.2) {
+              // invert last direction occasionally for variety
+              dx = -this._aaSmoothLastDir.dx;
+              dy = -this._aaSmoothLastDir.dy;
+            }
+            this._aaSmoothRandomDir = {dx: dx, dy: dy};
+            this._aaSmoothLastDir = {dx: dx, dy: dy};
+            // Hold this movement for a random amount of steps (each step is 1 move invocation)
+            // Convert to frames count: choose 2..6 steps (each step is one tile move)
+            var steps = KDCore.SDK ? KDCore.SDK.rand(2, 6) : (Math.floor(Math.random()*5)+2);
+            // AI frequency controls how often update is called - conserve in steps
+            this._aaSmoothRandomTimer = steps;
+          }
+        }
+        // If we have a chosen direction - attempt to move one tile in that direction
+        if (this._aaSmoothRandomDir) {
+          var ddx = this._aaSmoothRandomDir.dx;
+          var ddy = this._aaSmoothRandomDir.dy;
+          // target cell
+          var nx = this.x + ddx;
+          var ny = this.y + ddy;
+          // check passability using existing helper (falls back to $gameMap.isPassable if necessary)
+          var can = true;
+          try {
+            can = $gameMap.aaIsPointPassableForDodge(nx, ny);
+          } catch (err) {
+            // fallback simple passability check
+            try {
+              can = $gameMap.isPassable(nx, ny, 6) || $gameMap.isPassable(nx, ny, 4) || $gameMap.isPassable(nx, ny, 8) || $gameMap.isPassable(nx, ny, 2);
+            } catch (e2) {
+              can = false;
+            }
+          }
+          if (!can) {
+            // If blocked, reduce timer and pick a new direction next time
+            this._aaSmoothRandomTimer = 0;
+            this._aaSmoothRandomDir = null;
+            // slight turn toward target so enemy doesn't look frozen
+            this.aaTurnTowardTarget();
+            return;
+          }
+          // Map dx,dy to RPG Maker directions
+          var moved = false;
+          if (ddx !== 0 && ddy !== 0 && typeof this.moveDiagonally === 'function') {
+            // map horizontal: -1 -> 4, +1 -> 6 ; vertical: -1 -> 8, +1 -> 2
+            var horz = ddx === 1 ? 6 : 4;
+            var vert = ddy === 1 ? 2 : 8;
+            try {
+              this.moveDiagonally(horz, vert);
+              moved = true;
+            } catch (err) {
+              moved = false;
+            }
+          } else {
+            var dir = null;
+            if (ddx === 1 && ddy === 0) dir = 6;
+            if (ddx === -1 && ddy === 0) dir = 4;
+            if (ddx === 0 && ddy === 1) dir = 2;
+            if (ddx === 0 && ddy === -1) dir = 8;
+            if (dir !== null) {
+              try {
+                this.moveStraight(dir);
+                moved = true;
+              } catch (err) {
+                moved = false;
+              }
+            }
+          }
+          // If movement executed, decrement timer; else reset and try alternate behaviour next call
+          if (moved) {
+            this._aaSmoothRandomTimer--;
+            // Gentle facing: do not constantly snap to player; minor correction only when pausing
+            return;
+          } else {
+            // fallback: call original random movement once to prevent stuck states
+            try {
+              if (typeof this.moveRandom === 'function') {
+                this.moveRandom();
+              }
+            } catch (err) {}
+            this._aaSmoothRandomTimer = 0;
+            this._aaSmoothRandomDir = null;
+            return;
+          }
+        }
       }
     } catch (error) {
       e = error;
@@ -44334,6 +44467,7 @@ Window_SkillSelectorList = class Window_SkillSelectorList extends Window_Selecta
     }
     return null;
   };
+
 })();
 
 // ■ END Sprite_AAMapSkill2Projectile.coffee
