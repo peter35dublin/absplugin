@@ -24782,11 +24782,16 @@ FWindow_SkillSelect = class FWindow_SkillSelect extends KDCore.FloatingWindow {
   _.performDamage = function() {
     if (AA.isABSMap()) {
       if (this.isPlayer() && AA.PP.isShakeScreenWhenPlayerGetDamage()) {
-        // * Стандартный метод (тряска экрана и звук)
-        return ALIAS__performDamage.call(this);
-      } else {
-        // * Если не игрок, то нет тряски и звука
+        // * Custom Player Damage Effect: Animax 'Damage' action
+        
+        // NEW: Play Animax 'Damage' action on $gamePlayer
+        $gamePlayer.startAnimaXCustomAction('Damage', false, true); 
+        
+        // * Call the standard damage function for the sound and pop-up, skipping the screen shake alias.
         return Game_Battler.prototype.performDamage.call(this);
+      } else {
+        // * If not the player, or shake is disabled, use the standard method
+        return ALIAS__performDamage.call(this);
       }
     } else {
       return ALIAS__performDamage.call(this);
